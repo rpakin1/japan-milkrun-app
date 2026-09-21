@@ -1,3 +1,6 @@
+import matplotlib
+matplotlib.use('Agg')  # สำคัญมาก: ป้องกัน Segmentation Fault บน Streamlit Cloud
+
 import gc
 import math
 import matplotlib.pyplot as plt
