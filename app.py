@@ -1,5 +1,5 @@
 import os
-# Configure headless environment variables
+# Force headless/pure-python backends BEFORE any other imports
 os.environ["MPLBACKEND"] = "Agg"
 os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
 
@@ -11,6 +11,9 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
+
+# Clean garbage memory on script initialization
+gc.collect()
 
 # ==============================================================================
 # 1. Streamlit Page Configuration
@@ -56,11 +59,10 @@ def compute_haversine_matrix(df):
                 matrix[i][j] = int(round(dist_km * 1.35 / 45.0 * 60))
     return matrix
 
-def solve_pdvrp_engine(data, start_mode='AUTOMATIC', custom_start_list=None):
-    # Ensure fresh memory allocation
+def solve_pdvrp_engine(df_loc, df_dem, df_fleet, time_matrix, start_mode='AUTOMATIC', custom_start_list=None):
+    # Perform garbage collection before initializing OR-Tools objects
     gc.collect()
 
-    df_loc, df_dem, df_fleet, time_matrix = data['df_loc'], data['df_dem'], data['df_fleet'], data['time_matrix']
     df_dem_sub = df_dem[df_dem['Schedule'].isin(['MWF', 'Daily', 'TT'])].reset_index(drop=True)
     loc_to_idx = {loc_id: idx for idx, loc_id in enumerate(df_loc['Location_ID'])}
 
@@ -130,8 +132,10 @@ def solve_pdvrp_engine(data, start_mode='AUTOMATIC', custom_start_list=None):
     params.time_limit.seconds = 3
 
     sol = routing.SolveWithParameters(params)
+
     if not sol:
-        del manager, routing
+        del routing
+        del manager
         gc.collect()
         return None, 0
 
@@ -168,8 +172,10 @@ def solve_pdvrp_engine(data, start_mode='AUTOMATIC', custom_start_list=None):
             'stops': stops
         })
 
-    # Explicit C++ memory deallocation
-    del manager, routing, sol
+    # Safely deallocate C++ routing objects
+    del sol
+    del routing
+    del manager
     gc.collect()
 
     return active_routes, total_time
@@ -257,7 +263,6 @@ if file_loc and file_dem and file_fleet:
         df_loc = pd.concat([df_loc, pd.DataFrame(new_locs)], ignore_index=True)
 
     time_matrix = compute_haversine_matrix(df_loc)
-    data = {'df_loc': df_loc, 'df_dem': df_dem, 'df_fleet': df_fleet, 'time_matrix': time_matrix}
 
     st.subheader("⚙️ Solver Settings")
     start_option = st.radio(
@@ -270,7 +275,7 @@ if file_loc and file_dem and file_fleet:
 
     if st.button("🚀 Run Optimization"):
         with st.spinner("Calculating optimal routes using Google OR-Tools..."):
-            routes, total_time = solve_pdvrp_engine(data, mode_key, custom_starts)
+            routes, total_time = solve_pdvrp_engine(df_loc, df_dem, df_fleet, time_matrix, mode_key, custom_starts)
 
             if routes:
                 st.success(f"🎉 Optimization Complete! Active Fleet: {len(routes)} trucks | Total Driving Duration: {total_time} mins ({round(total_time / 60, 2)} hrs)")
