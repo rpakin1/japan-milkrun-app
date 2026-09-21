@@ -71,12 +71,12 @@ def solve_pdvrp_engine(df_loc, df_dem, df_fleet, time_matrix, start_mode='AUTOMA
     node_matrix_indices = []
     node_demands = []
 
-    # 1. Create 0-demand Dummy Start Nodes for each vehicle (Ensures safe OR-Tools start nodes)
+    # 1. Create 0-demand Dummy Start Nodes for each vehicle
     starts = list(range(num_vehicles))
     start_locations = []
     for v_idx in range(num_vehicles):
-        if start_mode == 'USER_DEFINED' and custom_start_list:
-            loc_name = custom_start_list[v_idx % len(custom_start_list)]
+        if start_mode == 'USER_DEFINED' and custom_start_list and v_idx < len(custom_start_list):
+            loc_name = custom_start_list[v_idx]
         else:
             loc_name = 'OURA'
         start_locations.append(loc_name)
@@ -281,7 +281,30 @@ if file_loc and file_dem and file_fleet:
         ["Option 1: User-Defined Starts", "Option 2: Program-Optimized Starts (Automatic)"]
     )
 
-    custom_starts = ['OURA', 'HIDAKA', 'OGURA', 'NUKABE']
+    all_locations = df_loc['Location_ID'].tolist()
+    custom_starts = []
+
+    # Dynamic starting location dropdowns for Option 1
+    if "Option 1" in start_option:
+        st.markdown("##### 📍 Select Start Location for Each Truck:")
+        cols = st.columns(min(len(df_fleet), 5))
+        default_defaults = ['OURA', 'HIDAKA', 'OGURA', 'NUKABE', 'OURA']
+
+        for v_idx, row in df_fleet.iterrows():
+            v_code = row['Vehicle_ID']
+            v_type = row['Vehicle_Type']
+            default_loc = default_defaults[v_idx % len(default_defaults)]
+            default_index = all_locations.index(default_loc) if default_loc in all_locations else 0
+
+            with cols[v_idx % len(cols)]:
+                selected_loc = st.selectbox(
+                    f"Start for {v_code} ({v_type}):",
+                    options=all_locations,
+                    index=default_index,
+                    key=f"start_loc_{v_code}"
+                )
+                custom_starts.append(selected_loc)
+
     mode_key = 'USER_DEFINED' if "Option 1" in start_option else 'AUTOMATIC'
 
     if st.button("🚀 Run Optimization"):
