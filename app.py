@@ -1,5 +1,5 @@
 import os
-# Force headless/pure-python backends BEFORE any other imports
+# Configure headless environment variables to prevent Segmentation Fault on cloud hosts
 os.environ["MPLBACKEND"] = "Agg"
 os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
 
@@ -60,39 +60,53 @@ def compute_haversine_matrix(df):
     return matrix
 
 def solve_pdvrp_engine(df_loc, df_dem, df_fleet, time_matrix, start_mode='AUTOMATIC', custom_start_list=None):
-    # Perform garbage collection before initializing OR-Tools objects
     gc.collect()
 
     df_dem_sub = df_dem[df_dem['Schedule'].isin(['MWF', 'Daily', 'TT'])].reset_index(drop=True)
     loc_to_idx = {loc_id: idx for idx, loc_id in enumerate(df_loc['Location_ID'])}
 
     num_reqs = len(df_dem_sub)
-    num_nodes = 1 + 2 * num_reqs
     num_vehicles = len(df_fleet)
 
-    node_matrix_indices = [loc_to_idx['OURA']]
-    node_demands = [0]
+    node_matrix_indices = []
+    node_demands = []
+
+    # 1. Create 0-demand Dummy Start Nodes for each vehicle (Ensures safe OR-Tools start nodes)
+    starts = list(range(num_vehicles))
+    start_locations = []
+    for v_idx in range(num_vehicles):
+        if start_mode == 'USER_DEFINED' and custom_start_list:
+            loc_name = custom_start_list[v_idx % len(custom_start_list)]
+        else:
+            loc_name = 'OURA'
+        start_locations.append(loc_name)
+        node_matrix_indices.append(loc_to_idx.get(loc_name, 0))
+        node_demands.append(0)
+
+    # 2. Create 0-demand Shared Return Depot Node (OURA)
+    end_depot_node = num_vehicles
+    ends = [end_depot_node] * num_vehicles
+    node_matrix_indices.append(loc_to_idx['OURA'])
+    node_demands.append(0)
+
+    # 3. Create Pickup and Delivery Request Nodes
+    pickup_delivery_pairs = []
     for i, row in df_dem_sub.iterrows():
         qty = int(row['Pallets'])
-        node_matrix_indices.append(loc_to_idx[row['Origin_Location_ID']])
+        p_matrix_idx = loc_to_idx[row['Origin_Location_ID']]
+        d_matrix_idx = loc_to_idx[row['Destination_Location_ID']]
+
+        p_node_idx = len(node_matrix_indices)
+        node_matrix_indices.append(p_matrix_idx)
         node_demands.append(qty)
-        node_matrix_indices.append(loc_to_idx[row['Destination_Location_ID']])
+
+        d_node_idx = len(node_matrix_indices)
+        node_matrix_indices.append(d_matrix_idx)
         node_demands.append(-qty)
 
-    ends = [0] * num_vehicles
-    starts = []
-    if start_mode == 'USER_DEFINED' and custom_start_list:
-        for v_idx in range(num_vehicles):
-            loc_name = custom_start_list[v_idx % len(custom_start_list)]
-            target_m_idx = loc_to_idx.get(loc_name, 0)
-            matched_node = 0
-            for n_idx, m_idx in enumerate(node_matrix_indices):
-                if m_idx == target_m_idx and node_demands[n_idx] >= 0:
-                    matched_node = n_idx
-                    break
-            starts.append(matched_node)
-    else:
-        starts = [0] * num_vehicles
+        pickup_delivery_pairs.append((p_node_idx, d_node_idx))
+
+    num_nodes = len(node_matrix_indices)
 
     manager = pywrapcp.RoutingIndexManager(num_nodes, num_vehicles, starts, ends)
     routing = pywrapcp.RoutingModel(manager)
@@ -117,8 +131,9 @@ def solve_pdvrp_engine(df_loc, df_dem, df_fleet, time_matrix, start_mode='AUTOMA
     routing.AddDimensionWithVehicleCapacity(dc_idx, 0, v_caps, True, 'Capacity')
 
     solver = routing.solver()
-    for i in range(num_reqs):
-        p_idx, d_idx = manager.NodeToIndex(2 * i + 1), manager.NodeToIndex(2 * i + 2)
+    for p_node, d_node in pickup_delivery_pairs:
+        p_idx = manager.NodeToIndex(p_node)
+        d_idx = manager.NodeToIndex(d_node)
         routing.AddPickupAndDelivery(p_idx, d_idx)
         solver.Add(routing.VehicleVar(p_idx) == routing.VehicleVar(d_idx))
         solver.Add(time_dim.CumulVar(p_idx) <= time_dim.CumulVar(d_idx))
@@ -134,8 +149,7 @@ def solve_pdvrp_engine(df_loc, df_dem, df_fleet, time_matrix, start_mode='AUTOMA
     sol = routing.SolveWithParameters(params)
 
     if not sol:
-        del routing
-        del manager
+        del routing, manager
         gc.collect()
         return None, 0
 
@@ -166,16 +180,13 @@ def solve_pdvrp_engine(df_loc, df_dem, df_fleet, time_matrix, start_mode='AUTOMA
             'v_code': v_code,
             'v_type': v_type,
             'v_cap': v_cap,
-            'start_loc': stops[0]['loc_id'],
+            'start_loc': start_locations[v],
             'duration_mins': duration,
             'color': colors[len(active_routes) % len(colors)],
             'stops': stops
         })
 
-    # Safely deallocate C++ routing objects
-    del sol
-    del routing
-    del manager
+    del sol, routing, manager
     gc.collect()
 
     return active_routes, total_time
