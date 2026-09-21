@@ -1,5 +1,5 @@
 import os
-# Configure headless environment variables to prevent Segmentation Fault on cloud hosts
+# Configure headless environment variables
 os.environ["MPLBACKEND"] = "Agg"
 os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
 
@@ -57,6 +57,9 @@ def compute_haversine_matrix(df):
     return matrix
 
 def solve_pdvrp_engine(data, start_mode='AUTOMATIC', custom_start_list=None):
+    # Ensure fresh memory allocation
+    gc.collect()
+
     df_loc, df_dem, df_fleet, time_matrix = data['df_loc'], data['df_dem'], data['df_fleet'], data['time_matrix']
     df_dem_sub = df_dem[df_dem['Schedule'].isin(['MWF', 'Daily', 'TT'])].reset_index(drop=True)
     loc_to_idx = {loc_id: idx for idx, loc_id in enumerate(df_loc['Location_ID'])}
@@ -128,6 +131,8 @@ def solve_pdvrp_engine(data, start_mode='AUTOMATIC', custom_start_list=None):
 
     sol = routing.SolveWithParameters(params)
     if not sol:
+        del manager, routing
+        gc.collect()
         return None, 0
 
     active_routes, total_time = [], 0
@@ -162,6 +167,11 @@ def solve_pdvrp_engine(data, start_mode='AUTOMATIC', custom_start_list=None):
             'color': colors[len(active_routes) % len(colors)],
             'stops': stops
         })
+
+    # Explicit C++ memory deallocation
+    del manager, routing, sol
+    gc.collect()
+
     return active_routes, total_time
 
 # ==============================================================================
@@ -278,7 +288,7 @@ if file_loc and file_dem and file_fleet:
                         "Duration (Mins)": r['duration_mins'],
                         "Route Sequence": sequence
                     })
-                st.dataframe(pd.DataFrame(summary_data), use_container_width=True)
+                st.dataframe(pd.DataFrame(summary_data), width="stretch")
 
                 # Subplot Visualization
                 st.subheader("🗺️ Individual Route Trajectories")
