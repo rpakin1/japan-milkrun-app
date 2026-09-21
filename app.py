@@ -1,6 +1,11 @@
-import matplotlib
-matplotlib.use('Agg')  # สำคัญมาก: ป้องกัน Segmentation Fault บน Streamlit Cloud
+import os
+os.environ["MPLBACKEND"] = "Agg"
+os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
 
+import matplotlib
+matplotlib.use('Agg')
+
+# จากนั้นค่อยตามด้วย import ตัวอื่นๆ ตามปกติ...
 import gc
 import math
 import matplotlib.pyplot as plt
