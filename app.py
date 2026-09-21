@@ -71,12 +71,12 @@ def solve_pdvrp_engine(df_loc, df_dem, df_fleet, time_matrix, start_mode='AUTOMA
     node_matrix_indices = []
     node_demands = []
 
-    # 1. Create 0-demand Dummy Start Nodes for each vehicle
+    # 1. Create 0-demand Dummy Start Nodes for each vehicle in the available fleet
     starts = list(range(num_vehicles))
     start_locations = []
     for v_idx in range(num_vehicles):
-        if start_mode == 'USER_DEFINED' and custom_start_list and v_idx < len(custom_start_list):
-            loc_name = custom_start_list[v_idx]
+        if start_mode == 'USER_DEFINED' and custom_start_list:
+            loc_name = custom_start_list[v_idx % len(custom_start_list)]
         else:
             loc_name = 'OURA'
         start_locations.append(loc_name)
@@ -284,24 +284,30 @@ if file_loc and file_dem and file_fleet:
     all_locations = df_loc['Location_ID'].tolist()
     custom_starts = []
 
-    # Dynamic starting location dropdowns for Option 1
+    # Dynamic starting location selection for Option 1
     if "Option 1" in start_option:
-        st.markdown("##### 📍 Select Start Location for Each Truck:")
-        cols = st.columns(min(len(df_fleet), 5))
-        default_defaults = ['OURA', 'HIDAKA', 'OGURA', 'NUKABE', 'OURA']
+        num_starts = st.number_input(
+            "Enter Number of Starting Locations to Define:",
+            min_value=1,
+            max_value=10,
+            value=4,
+            step=1
+        )
 
-        for v_idx, row in df_fleet.iterrows():
-            v_code = row['Vehicle_ID']
-            v_type = row['Vehicle_Type']
-            default_loc = default_defaults[v_idx % len(default_defaults)]
+        st.markdown("##### 📍 Select Starting Locations:")
+        default_defaults = ['OURA', 'HIDAKA', 'OGURA', 'NUKABE', 'OURA', 'KOHNAN', 'TONEX', 'MARUNAKA']
+        cols = st.columns(min(int(num_starts), 5))
+
+        for s_idx in range(int(num_starts)):
+            default_loc = default_defaults[s_idx % len(default_defaults)]
             default_index = all_locations.index(default_loc) if default_loc in all_locations else 0
 
-            with cols[v_idx % len(cols)]:
+            with cols[s_idx % len(cols)]:
                 selected_loc = st.selectbox(
-                    f"Start for {v_code} ({v_type}):",
+                    f"Start Location #{s_idx + 1}:",
                     options=all_locations,
                     index=default_index,
-                    key=f"start_loc_{v_code}"
+                    key=f"custom_start_{s_idx}"
                 )
                 custom_starts.append(selected_loc)
 
