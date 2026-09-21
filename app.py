@@ -1,13 +1,12 @@
 import os
+# Configure headless environment variables to prevent Segmentation Fault on cloud hosts
 os.environ["MPLBACKEND"] = "Agg"
 os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
 
-import matplotlib
-matplotlib.use('Agg')
-
-# จากนั้นค่อยตามด้วย import ตัวอื่นๆ ตามปกติ...
 import gc
 import math
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
@@ -23,12 +22,12 @@ st.set_page_config(
 )
 
 st.title("🚚 Japan Milk Run - Route Optimization App")
-st.write("แอปพลิเคชันจัดเส้นทางรถขนส่ง (VRP/Milkrun) คำนวณด้วย Google OR-Tools")
+st.write("Vehicle Routing Problem (VRP / Milk Run) Solver powered by Google OR-Tools")
 
 # ==============================================================================
 # 2. Sidebar File Uploaders
 # ==============================================================================
-st.sidebar.header("📁 อัปโหลดไฟล์ Master Data")
+st.sidebar.header("📁 Upload Master Data Files")
 file_loc = st.sidebar.file_uploader("1. locations_master", type=["csv", "xlsx"])
 file_dem = st.sidebar.file_uploader("2. demands_flows", type=["csv", "xlsx"])
 file_fleet = st.sidebar.file_uploader("3. fleet_master", type=["csv", "xlsx"])
@@ -40,20 +39,20 @@ def load_uploaded_file(uploaded_file):
         return pd.read_excel(uploaded_file)
 
 # ==============================================================================
-# 3. Helper Functions & Solver Engine
+# 3. Distance Matrix & Optimization Engine
 # ==============================================================================
 def compute_haversine_matrix(df):
     coords = list(zip(df['Latitude'], df['Longitude']))
     n = len(coords)
-    matrix = [[0]*n for _ in range(n)]
+    matrix = [[0] * n for _ in range(n)]
     for i in range(n):
         for j in range(n):
             if i != j:
                 lat1, lon1 = math.radians(coords[i][0]), math.radians(coords[i][1])
                 lat2, lon2 = math.radians(coords[j][0]), math.radians(coords[j][1])
                 dlat, dlon = lat2 - lat1, lon2 - lon1
-                a = math.sin(dlat/2)**2 + math.cos(lat1)*math.cos(lat2)*math.sin(dlon/2)**2
-                dist_km = 6371.0 * 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+                a = math.sin(dlat / 2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2)**2
+                dist_km = 6371.0 * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
                 matrix[i][j] = int(round(dist_km * 1.35 / 45.0 * 60))
     return matrix
 
@@ -100,12 +99,11 @@ def solve_pdvrp_engine(data, start_mode='AUTOMATIC', custom_start_list=None):
     tc_idx = routing.RegisterTransitCallback(time_cb)
     routing.SetArcCostEvaluatorOfAllVehicles(tc_idx)
 
-    # Add Time Dimension (13 Hours = 780 Mins)
+    # 13-Hour Maximum Driver Working Limit (780 Minutes)
     routing.AddDimension(tc_idx, 0, 780, True, 'Time')
     time_dim = routing.GetDimensionOrDie('Time')
     time_dim.SetGlobalSpanCostCoefficient(100)
 
-    # Add Capacity Dimension
     def demand_cb(from_idx):
         return node_demands[manager.IndexToNode(from_idx)]
 
@@ -113,7 +111,6 @@ def solve_pdvrp_engine(data, start_mode='AUTOMATIC', custom_start_list=None):
     v_caps = df_fleet['Capacity_Pallets'].tolist()
     routing.AddDimensionWithVehicleCapacity(dc_idx, 0, v_caps, True, 'Capacity')
 
-    # Pickup & Delivery Pair Constraints
     solver = routing.solver()
     for i in range(num_reqs):
         p_idx, d_idx = manager.NodeToIndex(2 * i + 1), manager.NodeToIndex(2 * i + 2)
@@ -156,11 +153,20 @@ def solve_pdvrp_engine(data, start_mode='AUTOMATIC', custom_start_list=None):
         duration = sol.Min(time_dim.CumulVar(routing.End(v)))
         total_time += duration
         active_routes.append({
-            'truck_num': len(active_routes) + 1, 'v_code': v_code, 'v_type': v_type, 'v_cap': v_cap,
-            'start_loc': stops[0]['loc_id'], 'duration_mins': duration, 'color': colors[len(active_routes) % len(colors)], 'stops': stops
+            'truck_num': len(active_routes) + 1,
+            'v_code': v_code,
+            'v_type': v_type,
+            'v_cap': v_cap,
+            'start_loc': stops[0]['loc_id'],
+            'duration_mins': duration,
+            'color': colors[len(active_routes) % len(colors)],
+            'stops': stops
         })
     return active_routes, total_time
 
+# ==============================================================================
+# 4. Route Subplot Visualizer
+# ==============================================================================
 def render_subplots(df_loc, routes, title):
     cols = 2
     rows = math.ceil(len(routes) / cols)
@@ -179,19 +185,22 @@ def render_subplots(df_loc, routes, title):
         loads = {}
         for s in stops:
             loc, dem = s['loc_id'], s['demand']
-            if loc not in loads: loads[loc] = {'p': 0, 'd': 0}
-            if dem > 0: loads[loc]['p'] += dem
-            elif dem < 0: loads[loc]['d'] += abs(dem)
+            if loc not in loads:
+                loads[loc] = {'p': 0, 'd': 0}
+            if dem > 0:
+                loads[loc]['p'] += dem
+            elif dem < 0:
+                loads[loc]['d'] += abs(dem)
 
         v_lons = [df_loc[df_loc['Location_ID'] == l]['Longitude'].values[0] for l in visited if l != 'OURA']
         v_lats = [df_loc[df_loc['Location_ID'] == l]['Latitude'].values[0] for l in visited if l != 'OURA']
         ax.scatter(v_lons, v_lats, color='#3377FF', s=550, zorder=4)
 
         for k in range(len(stops) - 1):
-            sx, sy, ex, ey = stops[k]['lon'], stops[k]['lat'], stops[k+1]['lon'], stops[k+1]['lat']
+            sx, sy, ex, ey = stops[k]['lon'], stops[k]['lat'], stops[k + 1]['lon'], stops[k + 1]['lat']
             dx, dy = ex - sx, ey - sy
             ax.plot([sx, ex], [sy, ey], color=r['color'], linewidth=2.5, alpha=0.9, zorder=5)
-            ax.arrow(sx + dx*0.4, sy + dy*0.4, dx*0.1, dy*0.1, shape='full', lw=0, length_includes_head=True, head_width=0.008, color=r['color'], zorder=6)
+            ax.arrow(sx + dx * 0.4, sy + dy * 0.4, dx * 0.1, dy * 0.1, shape='full', lw=0, length_includes_head=True, head_width=0.008, color=r['color'], zorder=6)
 
         for l in visited:
             lon = df_loc[df_loc['Location_ID'] == l]['Longitude'].values[0]
@@ -206,22 +215,23 @@ def render_subplots(df_loc, routes, title):
 
         ax.set_title(f"Truck {r['truck_num']}: {r['v_code']} ({r['v_type']})\n[START: {r['start_loc']} -> END: OURA] ({r['duration_mins']} mins)", fontsize=10, fontweight='bold', color=r['color'])
 
-    for j in range(len(routes), len(axes_flat)): fig.delaxes(axes_flat[j])
+    for j in range(len(routes), len(axes_flat)):
+        fig.delaxes(axes_flat[j])
     plt.suptitle(title, fontsize=14, fontweight='bold', y=1.01)
     plt.tight_layout()
     return fig
 
 # ==============================================================================
-# 4. Main App Execution Workflow
+# 5. Main Execution Flow
 # ==============================================================================
 if file_loc and file_dem and file_fleet:
     df_loc = load_uploaded_file(file_loc)
     df_dem = load_uploaded_file(file_dem)
     df_fleet = load_uploaded_file(file_fleet)
 
-    st.success("✅ อัปโหลดไฟล์ข้อมูลเรียบร้อยแล้ว")
+    st.success("✅ Files uploaded successfully!")
 
-    # Patch missing coordinates if needed
+    # Patch missing location coordinates if omitted in user inputs
     missing_locs = [
         {'Location_ID': 'GUNDAI', 'Latitude': 36.262843, 'Longitude': 139.223466},
         {'Location_ID': 'SANKO_KASEI', 'Latitude': 36.230514, 'Longitude': 139.159021},
@@ -239,24 +249,24 @@ if file_loc and file_dem and file_fleet:
     time_matrix = compute_haversine_matrix(df_loc)
     data = {'df_loc': df_loc, 'df_dem': df_dem, 'df_fleet': df_fleet, 'time_matrix': time_matrix}
 
-    st.subheader("⚙️ ตัวเลือกการคำนวณ")
+    st.subheader("⚙️ Solver Settings")
     start_option = st.radio(
-        "เลือกโหมดกำหนดจุดเริ่มต้นของรถ:",
-        ["Option 2: Program-Optimized Starts (คำนวณอัตโนมัติ)", "Option 1: User-Defined Starts (กำหนดจุดเริ่มเอง)"]
+        "Select Vehicle Dispatch Start Mode:",
+        ["Option 1: User-Defined Starts", "Option 2: Program-Optimized Starts (Automatic)"]
     )
 
-    custom_starts = ['OURA', 'TSUBAKIMOTO', 'OGURA', 'NUKABE']
-    mode_key = 'AUTOMATIC' if "Option 2" in start_option else 'USER_DEFINED'
+    custom_starts = ['OURA', 'HIDAKA', 'OGURA', 'NUKABE']
+    mode_key = 'USER_DEFINED' if "Option 1" in start_option else 'AUTOMATIC'
 
-    if st.button("🚀 คำนวณจัดเส้นทาง (Run Optimization)"):
-        with st.spinner("กำลังคำนวณเส้นทางด้วย Google OR-Tools..."):
+    if st.button("🚀 Run Optimization"):
+        with st.spinner("Calculating optimal routes using Google OR-Tools..."):
             routes, total_time = solve_pdvrp_engine(data, mode_key, custom_starts)
 
             if routes:
-                st.success(f"🎉 คำนวณสำเร็จ! ใช้รถทั้งหมด {len(routes)} คัน | เวลาขับรวม: {total_time} นาที ({round(total_time/60, 2)} ชั่วโมง)")
+                st.success(f"🎉 Optimization Complete! Active Fleet: {len(routes)} trucks | Total Driving Duration: {total_time} mins ({round(total_time / 60, 2)} hrs)")
 
                 # Summary Table
-                st.subheader("📊 ตารางสรุปเส้นทางแต่ละคัน")
+                st.subheader("📊 Fleet Dispatch Summary")
                 summary_data = []
                 for r in routes:
                     sequence = " -> ".join([s['loc_id'] for s in r['stops']])
@@ -270,14 +280,14 @@ if file_loc and file_dem and file_fleet:
                     })
                 st.dataframe(pd.DataFrame(summary_data), use_container_width=True)
 
-                # Subplot Chart Render
-                st.subheader("🗺️ แผนที่แสดงเส้นทางรถขนส่ง (Subplots)")
-                fig = render_subplots(df_loc, routes, f"Milkrun Optimization View ({start_option})")
+                # Subplot Visualization
+                st.subheader("🗺️ Individual Route Trajectories")
+                fig = render_subplots(df_loc, routes, f"Milk Run Optimization Trajectories ({start_option})")
                 st.pyplot(fig)
                 plt.close('all')
                 gc.collect()
             else:
-                st.error("ไม่สามารถจัดเส้นทางได้ตามเงื่อนไขความจุและเวลาที่กำหนด")
+                st.error("No feasible solution found within vehicle capacity and driver time limits.")
 
 else:
-    st.info("👈 กรุณาอัปโหลดไฟล์ CSV/Excel ทั้ง 3 ไฟล์ทางเมนูด้านซ้ายเพื่อเริ่มคำนวณ")
+    st.info("👈 Please upload `locations_master`, `demands_flows`, and `fleet_master` CSV/Excel files using the sidebar.")
