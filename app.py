@@ -167,16 +167,25 @@ def solve_pdvrp_engine(df_loc, df_dem, df_fleet, time_matrix, start_mode='AUTOMA
         while not routing.IsEnd(idx):
             node_idx = manager.IndexToNode(idx)
             m_idx = node_matrix_indices[node_idx]
+            cumul_mins = sol.Min(time_dim.CumulVar(idx))
             stops.append({
                 'loc_id': df_loc.loc[m_idx, 'Location_ID'],
                 'lat': df_loc.loc[m_idx, 'Latitude'],
                 'lon': df_loc.loc[m_idx, 'Longitude'],
-                'demand': node_demands[node_idx]
+                'demand': node_demands[node_idx],
+                'cumul_mins': cumul_mins
             })
             idx = sol.Value(routing.NextVar(idx))
             
-        stops.append({'loc_id': 'OURA', 'lat': df_loc.loc[0, 'Latitude'], 'lon': df_loc.loc[0, 'Longitude'], 'demand': 0})
-        duration = sol.Min(time_dim.CumulVar(routing.End(v)))
+        end_cumul_mins = sol.Min(time_dim.CumulVar(idx))
+        stops.append({
+            'loc_id': 'OURA', 
+            'lat': df_loc.loc[0, 'Latitude'], 
+            'lon': df_loc.loc[0, 'Longitude'], 
+            'demand': 0,
+            'cumul_mins': end_cumul_mins
+        })
+        duration = end_cumul_mins
         total_time += duration
         
         active_routes.append({
@@ -196,7 +205,7 @@ def solve_pdvrp_engine(df_loc, df_dem, df_fleet, time_matrix, start_mode='AUTOMA
     return active_routes, total_time
 
 # ==============================================================================
-# 4. Route Visualizers (Master Map & Single Vehicle Map)
+# 4. Route Visualizers & Exporters
 # ==============================================================================
 def render_combined_master_map(df_loc, routes):
     """Renders a single master map with all vehicle routes plotted together."""
@@ -205,11 +214,9 @@ def render_combined_master_map(df_loc, routes):
 
     depot_mask = (df_loc['Location_ID'] == 'OURA')
     
-    # Base background points
     ax.scatter(df_loc.loc[~depot_mask, 'Longitude'], df_loc.loc[~depot_mask, 'Latitude'], color='#D0D0D0', s=300, zorder=2, label='Locations')
     ax.scatter(df_loc.loc[depot_mask, 'Longitude'], df_loc.loc[depot_mask, 'Latitude'], color='#FF2222', s=600, zorder=3, label='Central Depot (OURA)')
 
-    # Annotate all locations
     for _, row in df_loc.iterrows():
         l_id, lat, lon = row['Location_ID'], row['Latitude'], row['Longitude']
         if l_id == 'OURA':
@@ -217,7 +224,6 @@ def render_combined_master_map(df_loc, routes):
         else:
             ax.text(lon + 0.003, lat + 0.002, l_id, fontsize=8, weight='bold', bbox=dict(boxstyle="square,pad=0.15", fc="white", ec="gray", alpha=0.8))
 
-    # Plot each vehicle's line and path
     for r in routes:
         stops = r['stops']
         for k in range(len(stops) - 1):
@@ -279,25 +285,6 @@ def render_single_route_plot(df_loc, r):
     plt.tight_layout()
     return fig
 
-def render_subplots(df_loc, routes, title):
-    cols = 2
-    rows = math.ceil(len(routes) / cols)
-    fig, axes = plt.subplots(rows, cols, figsize=(16, 5 * rows))
-    axes_flat = [axes] if len(routes) == 1 else axes.flatten()
-
-    for i, r in enumerate(routes):
-        ax = axes_flat[i]
-        # Re-use single route visualization logic into subplot axes
-        sub_fig = render_single_route_plot(df_loc, r)
-        # Transfer content to subplot
-        plt.close(sub_fig)
-
-    for j in range(len(routes), len(axes_flat)):
-        fig.delaxes(axes_flat[j])
-    plt.suptitle(title, fontsize=14, fontweight='bold', y=1.01)
-    plt.tight_layout()
-    return fig
-
 def generate_google_maps_url(stops):
     """Generates a direct Google Maps Directions URL for a given sequence of stops."""
     if len(stops) < 2:
@@ -341,8 +328,8 @@ def generate_kml_file(routes):
     kml.append('</kml>')
     return "\n".join(kml)
 
-# Dialog Modal for Full Screen & Stop Activity Breakdown
-@st.dialog("🔍 Route Activity Breakdown", width="large")
+# Dialog Modal for Full Screen & Timed Stop Activity Breakdown
+@st.dialog("🔍 Route Activity & Arrival Time Breakdown", width="large")
 def show_route_detail_modal(df_loc, r):
     st.subheader(f"🚚 Truck {r['truck_num']}: {r['v_code']} ({r['v_type']})")
     st.write(f"**Max Capacity:** {r['v_cap']} Pallets | **Total Duration:** {r['duration_mins']} Mins")
@@ -352,17 +339,23 @@ def show_route_detail_modal(df_loc, r):
     st.pyplot(fig)
     plt.close(fig)
 
-    # Activity sequence breakdown table
-    st.markdown("### 📋 Sequential Stop & Cargo Activity Log")
-    st.caption("This log clarifies why locations (like OURA) are re-visited to pickup or unload cargo.")
+    # Activity sequence breakdown table with timestamps
+    st.markdown("### 📋 Timed Sequential Stop & Cargo Activity Log")
+    st.caption("Calculates arrival timestamps assuming dispatch begins at 08:00 AM.")
 
     activity_log = []
     current_onboard = 0
+    start_hour = 8
 
     for idx, s in enumerate(r['stops']):
         loc = s['loc_id']
         dem = s['demand']
+        mins = s['cumul_mins']
         
+        arrival_hh = start_hour + (mins // 60)
+        arrival_mm = mins % 60
+        clock_time = f"{arrival_hh:02d}:{arrival_mm:02d}"
+
         if dem > 0:
             action = f"📦 PICKUP (+{dem} Pallets)"
             current_onboard += dem
@@ -370,11 +363,13 @@ def show_route_detail_modal(df_loc, r):
             action = f"📦 UNLOAD (-{abs(dem)} Pallets)"
             current_onboard -= abs(dem)
         else:
-            action = "🏁 DEPART / RETURN DEPOT" if idx == 0 or idx == len(r['stops']) - 1 else "🔄 TRANSIT PASS"
+            action = "🏁 DEPARTURE DEPOT" if idx == 0 else ("🏁 FINAL RETURN DEPOT" if idx == len(r['stops']) - 1 else "🔄 TRANSIT / DROP-OFF")
 
         activity_log.append({
             "Stop #": idx + 1,
             "Location": loc,
+            "Elapsed Driving Time": f"+{mins} mins",
+            "Est. Arrival Clock Time": clock_time,
             "Activity": action,
             "Pallets Changed": f"+{dem}" if dem > 0 else (f"{dem}" if dem < 0 else "0"),
             "Onboard Load After Stop": f"{current_onboard} / {r['v_cap']} Pallets"
@@ -473,24 +468,24 @@ if file_loc and file_dem and file_fleet:
         st.pyplot(master_fig)
         plt.close(master_fig)
 
-        # 2. Summary Table & Inspection Buttons
+        # 2. Summary Table with Elapsed Driving Timestamps
         st.subheader("📊 Fleet Dispatch Summary")
         summary_data = []
         for r in routes:
-            sequence = " -> ".join([s['loc_id'] for s in r['stops']])
+            sequence_with_times = " -> ".join([f"{s['loc_id']} (+{s['cumul_mins']}m)" for s in r['stops']])
             summary_data.append({
                 "Vehicle ID": r['v_code'],
                 "Vehicle Type": r['v_type'],
                 "Capacity (Pallets)": r['v_cap'],
                 "Start Location": r['start_loc'],
                 "Duration (Mins)": r['duration_mins'],
-                "Route Sequence": sequence
+                "Route Sequence (Location & Arrival Elapsed Minutes)": sequence_with_times
             })
         st.dataframe(pd.DataFrame(summary_data), use_container_width=True)
 
         # 3. Individual Route Inspection Controls
         st.subheader("🔍 Inspect & Analyze Individual Vehicle Routes")
-        st.caption("Click any button below to open a full-screen view and examine step-by-step load/unload activities.")
+        st.caption("Click any button below to open a full-screen view and examine timed step-by-step load/unload activities.")
 
         cols = st.columns(min(len(routes), 3))
         for idx, r in enumerate(routes):
