@@ -10,6 +10,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
+import urllib.parse
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
 # Clean garbage memory on script initialization
@@ -192,7 +193,7 @@ def solve_pdvrp_engine(df_loc, df_dem, df_fleet, time_matrix, start_mode='AUTOMA
     return active_routes, total_time
 
 # ==============================================================================
-# 4. Route Subplot Visualizer
+# 4. Route Subplot Visualizer & Google Maps Exporters
 # ==============================================================================
 def render_subplots(df_loc, routes, title):
     cols = 2
@@ -247,6 +248,49 @@ def render_subplots(df_loc, routes, title):
     plt.suptitle(title, fontsize=14, fontweight='bold', y=1.01)
     plt.tight_layout()
     return fig
+
+def generate_google_maps_url(stops):
+    """Generates a direct Google Maps Directions URL for a given sequence of stops."""
+    if len(stops) < 2:
+        return ""
+    origin = f"{stops[0]['lat']},{stops[0]['lon']}"
+    destination = f"{stops[-1]['lat']},{stops[-1]['lon']}"
+    waypoints = "|".join([f"{s['lat']},{s['lon']}" for s in stops[1:-1]])
+    
+    base_url = "https://www.google.com/maps/dir/?api=1"
+    params = {
+        "origin": origin,
+        "destination": destination,
+        "travelmode": "driving"
+    }
+    if waypoints:
+        params["waypoints"] = waypoints
+        
+    return f"{base_url}&{urllib.parse.urlencode(params)}"
+
+def generate_kml_file(routes):
+    """Generates KML xml file content to import into Google My Maps."""
+    kml = ['<?xml version="1.0" encoding="UTF-8"?>']
+    kml.append('<kml xmlns="http://www.opengis.net/kml/2.2">')
+    kml.append('  <Document>')
+    kml.append('    <name>Milk Run Optimized Routes</name>')
+    
+    for r in routes:
+        kml.append('    <Placemark>')
+        kml.append(f'      <name>Truck {r["truck_num"]} ({r["v_code"]})</name>')
+        kml.append(f'      <description>Vehicle Type: {r["v_type"]} | Duration: {r["duration_mins"]} mins</description>')
+        kml.append('      <LineString>')
+        kml.append('        <tessellate>1</tessellate>')
+        kml.append('        <coordinates>')
+        for s in r['stops']:
+            kml.append(f'          {s["lon"]},{s["lat"]},0')
+        kml.append('        </coordinates>')
+        kml.append('      </LineString>')
+        kml.append('    </Placemark>')
+        
+    kml.append('  </Document>')
+    kml.append('</kml>')
+    return "\n".join(kml)
 
 # ==============================================================================
 # 5. Main Execution Flow
@@ -314,35 +358,93 @@ if file_loc and file_dem and file_fleet:
     mode_key = 'USER_DEFINED' if "Option 1" in start_option else 'AUTOMATIC'
 
     if st.button("🚀 Run Optimization"):
-        with st.spinner("Calculating optimal routes using Google OR-Tools..."):
-            routes, total_time = solve_pdvrp_engine(df_loc, df_dem, df_fleet, time_matrix, mode_key, custom_starts)
+        if mode_key == 'AUTOMATIC':
+            best_routes = None
+            best_time = float('inf')
+            best_start_loc = None
 
-            if routes:
-                st.success(f"🎉 Optimization Complete! Active Fleet: {len(routes)} trucks | Total Driving Duration: {total_time} mins ({round(total_time / 60, 2)} hrs)")
+            candidate_locations = df_loc['Location_ID'].tolist()
+            progress_bar = st.progress(0)
+            status_text = st.empty()
 
-                # Summary Table
-                st.subheader("📊 Fleet Dispatch Summary")
-                summary_data = []
-                for r in routes:
-                    sequence = " -> ".join([s['loc_id'] for s in r['stops']])
-                    summary_data.append({
-                        "Vehicle ID": r['v_code'],
-                        "Vehicle Type": r['v_type'],
-                        "Capacity (Pallets)": r['v_cap'],
-                        "Start Location": r['start_loc'],
-                        "Duration (Mins)": r['duration_mins'],
-                        "Route Sequence": sequence
-                    })
-                st.dataframe(pd.DataFrame(summary_data), width="stretch")
+            for idx, cand in enumerate(candidate_locations):
+                status_text.text(f"Evaluating candidate starting location ({idx + 1}/{len(candidate_locations)}): {cand}...")
+                
+                # Test all vehicles starting from candidate location 'cand'
+                test_routes, test_time = solve_pdvrp_engine(
+                    df_loc, df_dem, df_fleet, time_matrix, 
+                    start_mode='USER_DEFINED', 
+                    custom_start_list=[cand]
+                )
 
-                # Subplot Visualization
-                st.subheader("🗺️ Individual Route Trajectories")
-                fig = render_subplots(df_loc, routes, f"Milk Run Optimization Trajectories ({start_option})")
-                st.pyplot(fig)
-                plt.close('all')
-                gc.collect()
-            else:
-                st.error("No feasible solution found within vehicle capacity and driver time limits.")
+                if test_routes and test_time < best_time:
+                    best_time = test_time
+                    best_routes = test_routes
+                    best_start_loc = cand
+
+                progress_bar.progress((idx + 1) / len(candidate_locations))
+
+            progress_bar.empty()
+            status_text.empty()
+
+            routes, total_time = best_routes, best_time
+
+            if best_start_loc:
+                st.info(f"💡 **Program Recommendation:** Starting all dispatches from **{best_start_loc}** yields the optimal driving duration ({total_time} mins).")
+        else:
+            with st.spinner("Calculating optimal routes using Google OR-Tools..."):
+                routes, total_time = solve_pdvrp_engine(df_loc, df_dem, df_fleet, time_matrix, mode_key, custom_starts)
+
+        if routes:
+            st.success(f"🎉 Optimization Complete! Active Fleet: {len(routes)} trucks | Total Driving Duration: {total_time} mins ({round(total_time / 60, 2)} hrs)")
+
+            # Summary Table
+            st.subheader("📊 Fleet Dispatch Summary")
+            summary_data = []
+            for r in routes:
+                sequence = " -> ".join([s['loc_id'] for s in r['stops']])
+                summary_data.append({
+                    "Vehicle ID": r['v_code'],
+                    "Vehicle Type": r['v_type'],
+                    "Capacity (Pallets)": r['v_cap'],
+                    "Start Location": r['start_loc'],
+                    "Duration (Mins)": r['duration_mins'],
+                    "Route Sequence": sequence
+                })
+            st.dataframe(pd.DataFrame(summary_data), width="stretch")
+
+            # Google Maps Links & KML Export
+            st.subheader("📍 Google Maps Integration")
+            
+            # 1. Download KML file for Google My Maps
+            kml_data = generate_kml_file(routes)
+            st.download_button(
+                label="🗺️ Download KML File for Google My Maps",
+                data=kml_data,
+                file_name="optimized_milk_run_routes.kml",
+                mime="application/vnd.google-earth.kml+xml",
+                help="Import this file into Google My Maps (mymaps.google.com) to view all routes together!"
+            )
+            
+            # 2. Individual Google Maps Links
+            st.markdown("##### 🔗 Open Individual Truck Directions in Google Maps:")
+            map_cols = st.columns(min(len(routes), 3))
+            for idx, r in enumerate(routes):
+                gmaps_url = generate_google_maps_url(r['stops'])
+                with map_cols[idx % 3]:
+                    st.link_button(
+                        f"🚚 Truck {r['truck_num']} ({r['v_code']}) Direct Route", 
+                        gmaps_url
+                    )
+
+            # Subplot Visualization
+            st.subheader("🗺️ Individual Route Trajectories")
+            fig = render_subplots(df_loc, routes, f"Milk Run Optimization Trajectories ({start_option})")
+            st.pyplot(fig)
+            plt.close('all')
+            gc.collect()
+        else:
+            st.error("No feasible solution found within vehicle capacity and driver time limits.")
 
 else:
     st.info("👈 Please upload `locations_master`, `demands_flows`, and `fleet_master` CSV/Excel files using the sidebar.")
