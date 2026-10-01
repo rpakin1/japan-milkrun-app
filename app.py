@@ -350,7 +350,7 @@ def show_route_detail_modal(df_loc, r):
     for idx, s in enumerate(r['stops']):
         loc = s['loc_id']
         dem = s['demand']
-        mins = s['cumul_mins']
+        mins = s.get('cumul_mins', 0)
         
         arrival_hh = start_hour + (mins // 60)
         arrival_mm = mins % 60
@@ -472,7 +472,7 @@ if file_loc and file_dem and file_fleet:
         st.subheader("📊 Fleet Dispatch Summary")
         summary_data = []
         for r in routes:
-            sequence_with_times = " -> ".join([f"{s['loc_id']} (+{s['cumul_mins']}m)" for s in r['stops']])
+            sequence_with_times = " -> ".join([f"{s['loc_id']} (+{s.get('cumul_mins', 0)}m)" for s in r['stops']])
             summary_data.append({
                 "Vehicle ID": r['v_code'],
                 "Vehicle Type": r['v_type'],
