@@ -156,7 +156,7 @@ def solve_pdvrp_engine(df_loc, df_dem, df_fleet, time_matrix, start_mode='AUTOMA
         return None, 0
 
     active_routes, total_time = [], 0
-    colors = ['#E63946', '#2A9D8F', '#F4A261', '#9C27B0', '#3F51B5']
+    colors = ['#E63946', '#2A9D8F', '#F4A261', '#9C27B0', '#3F51B5', '#009688', '#FF5722']
 
     for v in range(num_vehicles):
         idx = routing.Start(v)
@@ -196,55 +196,101 @@ def solve_pdvrp_engine(df_loc, df_dem, df_fleet, time_matrix, start_mode='AUTOMA
     return active_routes, total_time
 
 # ==============================================================================
-# 4. Route Subplot Visualizer & Google Maps Exporters
+# 4. Route Visualizers (Master Map & Single Vehicle Map)
 # ==============================================================================
+def render_combined_master_map(df_loc, routes):
+    """Renders a single master map with all vehicle routes plotted together."""
+    fig, ax = plt.subplots(figsize=(14, 8))
+    ax.grid(True, linestyle='--', alpha=0.5)
+
+    depot_mask = (df_loc['Location_ID'] == 'OURA')
+    
+    # Base background points
+    ax.scatter(df_loc.loc[~depot_mask, 'Longitude'], df_loc.loc[~depot_mask, 'Latitude'], color='#D0D0D0', s=300, zorder=2, label='Locations')
+    ax.scatter(df_loc.loc[depot_mask, 'Longitude'], df_loc.loc[depot_mask, 'Latitude'], color='#FF2222', s=600, zorder=3, label='Central Depot (OURA)')
+
+    # Annotate all locations
+    for _, row in df_loc.iterrows():
+        l_id, lat, lon = row['Location_ID'], row['Latitude'], row['Longitude']
+        if l_id == 'OURA':
+            ax.text(lon + 0.005, lat + 0.003, "OURA [DEPOT]", fontsize=10, weight='bold', color='darkred', bbox=dict(boxstyle="round,pad=0.2", fc="#FFE6E6", ec="red"))
+        else:
+            ax.text(lon + 0.003, lat + 0.002, l_id, fontsize=8, weight='bold', bbox=dict(boxstyle="square,pad=0.15", fc="white", ec="gray", alpha=0.8))
+
+    # Plot each vehicle's line and path
+    for r in routes:
+        stops = r['stops']
+        for k in range(len(stops) - 1):
+            sx, sy, ex, ey = stops[k]['lon'], stops[k]['lat'], stops[k + 1]['lon'], stops[k + 1]['lat']
+            dx, dy = ex - sx, ey - sy
+            ax.plot([sx, ex], [sy, ey], color=r['color'], linewidth=2.5, alpha=0.85, zorder=4, label=f"Truck {r['truck_num']} ({r['v_code']})" if k == 0 else "")
+            if (dx != 0 or dy != 0):
+                ax.arrow(sx + dx * 0.45, sy + dy * 0.45, dx * 0.08, dy * 0.08, shape='full', lw=0, length_includes_head=True, head_width=0.008, color=r['color'], zorder=5)
+
+    ax.set_title("🌐 Master Route Map - All Vehicles Combined Loop", fontsize=14, fontweight='bold')
+    ax.legend(loc='upper right', frameon=True)
+    plt.tight_layout()
+    return fig
+
+def render_single_route_plot(df_loc, r):
+    """Renders a detailed single-vehicle route plot."""
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.grid(True, linestyle='--', alpha=0.5)
+
+    depot_mask = (df_loc['Location_ID'] == 'OURA')
+    ax.scatter(df_loc.loc[~depot_mask, 'Longitude'], df_loc.loc[~depot_mask, 'Latitude'], color='#E0E0E0', s=250, zorder=2)
+    ax.scatter(df_loc.loc[depot_mask, 'Longitude'], df_loc.loc[depot_mask, 'Latitude'], color='#FF2222', s=500, zorder=3)
+
+    stops = r['stops']
+    visited = set([s['loc_id'] for s in stops])
+    loads = {}
+    for s in stops:
+        loc, dem = s['loc_id'], s['demand']
+        if loc not in loads:
+            loads[loc] = {'p': 0, 'd': 0}
+        if dem > 0:
+            loads[loc]['p'] += dem
+        elif dem < 0:
+            loads[loc]['d'] += abs(dem)
+
+    v_lons = [df_loc[df_loc['Location_ID'] == l]['Longitude'].values[0] for l in visited if l != 'OURA']
+    v_lats = [df_loc[df_loc['Location_ID'] == l]['Latitude'].values[0] for l in visited if l != 'OURA']
+    ax.scatter(v_lons, v_lats, color='#3377FF', s=500, zorder=4)
+
+    for k in range(len(stops) - 1):
+        sx, sy, ex, ey = stops[k]['lon'], stops[k]['lat'], stops[k + 1]['lon'], stops[k + 1]['lat']
+        dx, dy = ex - sx, ey - sy
+        ax.plot([sx, ex], [sy, ey], color=r['color'], linewidth=3.0, alpha=0.9, zorder=5)
+        if (dx != 0 or dy != 0):
+            ax.arrow(sx + dx * 0.4, sy + dy * 0.4, dx * 0.1, dy * 0.1, shape='full', lw=0, length_includes_head=True, head_width=0.008, color=r['color'], zorder=6)
+
+    for l in visited:
+        lon = df_loc[df_loc['Location_ID'] == l]['Longitude'].values[0]
+        lat = df_loc[df_loc['Location_ID'] == l]['Latitude'].values[0]
+        p, d = loads[l]['p'], loads[l]['d']
+        if l == 'OURA':
+            ax.text(lon + 0.005, lat + 0.003, "OURA [DEPOT END]", fontsize=9, weight='bold', color='darkred', bbox=dict(boxstyle="round,pad=0.2", fc="#FFE6E6", ec="red"))
+        elif l == r['start_loc']:
+            ax.text(lon + 0.004, lat + 0.002, f"START: {l}\n(+{p} load, -{d} unload)", fontsize=8.5, weight='bold', color='darkgreen', bbox=dict(boxstyle="square,pad=0.2", fc="#E6FFE6", ec="green"))
+        else:
+            ax.text(lon + 0.004, lat + 0.002, f"{l}\n(+{p} load, -{d} unload)", fontsize=8.5, weight='bold', bbox=dict(boxstyle="square,pad=0.2", fc="white", ec="gray", alpha=0.85))
+
+    ax.set_title(f"Truck {r['truck_num']}: {r['v_code']} ({r['v_type']}) - [START: {r['start_loc']} -> END: OURA] ({r['duration_mins']} mins)", fontsize=11, fontweight='bold', color=r['color'])
+    plt.tight_layout()
+    return fig
+
 def render_subplots(df_loc, routes, title):
     cols = 2
     rows = math.ceil(len(routes) / cols)
     fig, axes = plt.subplots(rows, cols, figsize=(16, 5 * rows))
     axes_flat = [axes] if len(routes) == 1 else axes.flatten()
-    depot_mask = (df_loc['Location_ID'] == 'OURA')
 
     for i, r in enumerate(routes):
         ax = axes_flat[i]
-        ax.grid(True, linestyle='--', alpha=0.5)
-        ax.scatter(df_loc.loc[~depot_mask, 'Longitude'], df_loc.loc[~depot_mask, 'Latitude'], color='#D0D0D0', s=300, zorder=2)
-        ax.scatter(df_loc.loc[depot_mask, 'Longitude'], df_loc.loc[depot_mask, 'Latitude'], color='#FF2222', s=550, zorder=3)
-
-        stops = r['stops']
-        visited = set([s['loc_id'] for s in stops])
-        loads = {}
-        for s in stops:
-            loc, dem = s['loc_id'], s['demand']
-            if loc not in loads:
-                loads[loc] = {'p': 0, 'd': 0}
-            if dem > 0:
-                loads[loc]['p'] += dem
-            elif dem < 0:
-                loads[loc]['d'] += abs(dem)
-
-        v_lons = [df_loc[df_loc['Location_ID'] == l]['Longitude'].values[0] for l in visited if l != 'OURA']
-        v_lats = [df_loc[df_loc['Location_ID'] == l]['Latitude'].values[0] for l in visited if l != 'OURA']
-        ax.scatter(v_lons, v_lats, color='#3377FF', s=550, zorder=4)
-
-        for k in range(len(stops) - 1):
-            sx, sy, ex, ey = stops[k]['lon'], stops[k]['lat'], stops[k + 1]['lon'], stops[k + 1]['lat']
-            dx, dy = ex - sx, ey - sy
-            ax.plot([sx, ex], [sy, ey], color=r['color'], linewidth=2.5, alpha=0.9, zorder=5)
-            ax.arrow(sx + dx * 0.4, sy + dy * 0.4, dx * 0.1, dy * 0.1, shape='full', lw=0, length_includes_head=True, head_width=0.008, color=r['color'], zorder=6)
-
-        for l in visited:
-            lon = df_loc[df_loc['Location_ID'] == l]['Longitude'].values[0]
-            lat = df_loc[df_loc['Location_ID'] == l]['Latitude'].values[0]
-            p, d = loads[l]['p'], loads[l]['d']
-            if l == 'OURA':
-                ax.text(lon + 0.005, lat + 0.003, "OURA [DEPOT END]", fontsize=8.5, weight='bold', color='darkred', bbox=dict(boxstyle="round,pad=0.2", fc="#FFE6E6", ec="red"))
-            elif l == r['start_loc']:
-                ax.text(lon + 0.004, lat + 0.002, f"START: {l}\n(+{p} load, -{d} unload)", fontsize=8, weight='bold', color='darkgreen', bbox=dict(boxstyle="square,pad=0.2", fc="#E6FFE6", ec="green"))
-            else:
-                ax.text(lon + 0.004, lat + 0.002, f"{l}\n(+{p} load, -{d} unload)", fontsize=8, weight='bold', bbox=dict(boxstyle="square,pad=0.2", fc="white", ec="gray", alpha=0.85))
-
-        ax.set_title(f"Truck {r['truck_num']}: {r['v_code']} ({r['v_type']})\n[START: {r['start_loc']} -> END: OURA] ({r['duration_mins']} mins)", fontsize=10, fontweight='bold', color=r['color'])
+        # Re-use single route visualization logic into subplot axes
+        sub_fig = render_single_route_plot(df_loc, r)
+        # Transfer content to subplot
+        plt.close(sub_fig)
 
     for j in range(len(routes), len(axes_flat)):
         fig.delaxes(axes_flat[j])
@@ -294,6 +340,47 @@ def generate_kml_file(routes):
     kml.append('  </Document>')
     kml.append('</kml>')
     return "\n".join(kml)
+
+# Dialog Modal for Full Screen & Stop Activity Breakdown
+@st.dialog("🔍 Route Activity Breakdown", width="large")
+def show_route_detail_modal(df_loc, r):
+    st.subheader(f"🚚 Truck {r['truck_num']}: {r['v_code']} ({r['v_type']})")
+    st.write(f"**Max Capacity:** {r['v_cap']} Pallets | **Total Duration:** {r['duration_mins']} Mins")
+
+    # Display large individual map
+    fig = render_single_route_plot(df_loc, r)
+    st.pyplot(fig)
+    plt.close(fig)
+
+    # Activity sequence breakdown table
+    st.markdown("### 📋 Sequential Stop & Cargo Activity Log")
+    st.caption("This log clarifies why locations (like OURA) are re-visited to pickup or unload cargo.")
+
+    activity_log = []
+    current_onboard = 0
+
+    for idx, s in enumerate(r['stops']):
+        loc = s['loc_id']
+        dem = s['demand']
+        
+        if dem > 0:
+            action = f"📦 PICKUP (+{dem} Pallets)"
+            current_onboard += dem
+        elif dem < 0:
+            action = f"📦 UNLOAD (-{abs(dem)} Pallets)"
+            current_onboard -= abs(dem)
+        else:
+            action = "🏁 DEPART / RETURN DEPOT" if idx == 0 or idx == len(r['stops']) - 1 else "🔄 TRANSIT PASS"
+
+        activity_log.append({
+            "Stop #": idx + 1,
+            "Location": loc,
+            "Activity": action,
+            "Pallets Changed": f"+{dem}" if dem > 0 else (f"{dem}" if dem < 0 else "0"),
+            "Onboard Load After Stop": f"{current_onboard} / {r['v_cap']} Pallets"
+        })
+
+    st.dataframe(pd.DataFrame(activity_log), use_container_width=True)
 
 # ==============================================================================
 # 5. Main Execution Flow
@@ -365,55 +452,72 @@ if file_loc and file_dem and file_fleet:
             routes, total_time = solve_pdvrp_engine(df_loc, df_dem, df_fleet, time_matrix, mode_key, custom_starts)
 
         if routes:
-            st.success(f"🎉 Optimization Complete! Active Fleet: {len(routes)} trucks | Total Driving Duration: {total_time} mins ({round(total_time / 60, 2)} hrs)")
-
-            # Summary Table
-            st.subheader("📊 Fleet Dispatch Summary")
-            summary_data = []
-            for r in routes:
-                sequence = " -> ".join([s['loc_id'] for s in r['stops']])
-                summary_data.append({
-                    "Vehicle ID": r['v_code'],
-                    "Vehicle Type": r['v_type'],
-                    "Capacity (Pallets)": r['v_cap'],
-                    "Start Location": r['start_loc'],
-                    "Duration (Mins)": r['duration_mins'],
-                    "Route Sequence": sequence
-                })
-            st.dataframe(pd.DataFrame(summary_data), width="stretch")
-
-            # Google Maps Links & KML Export
-            st.subheader("📍 Google Maps Integration")
-            
-            # 1. Download KML file for Google My Maps
-            kml_data = generate_kml_file(routes)
-            st.download_button(
-                label="🗺️ Download KML File for Google My Maps",
-                data=kml_data,
-                file_name="optimized_milk_run_routes.kml",
-                mime="application/vnd.google-earth.kml+xml",
-                help="Import this file into Google My Maps (mymaps.google.com) to view all routes together!"
-            )
-            
-            # 2. Individual Google Maps Links
-            st.markdown("##### 🔗 Open Individual Truck Directions in Google Maps:")
-            map_cols = st.columns(min(len(routes), 3))
-            for idx, r in enumerate(routes):
-                gmaps_url = generate_google_maps_url(r['stops'])
-                with map_cols[idx % 3]:
-                    st.link_button(
-                        f"🚚 Truck {r['truck_num']} ({r['v_code']}) Direct Route", 
-                        gmaps_url
-                    )
-
-            # Subplot Visualization
-            st.subheader("🗺️ Individual Route Trajectories")
-            fig = render_subplots(df_loc, routes, f"Milk Run Optimization Trajectories ({start_option})")
-            st.pyplot(fig)
-            plt.close('all')
-            gc.collect()
+            st.session_state['routes'] = routes
+            st.session_state['total_time'] = total_time
+            st.session_state['df_loc'] = df_loc
         else:
             st.error("No feasible solution found within vehicle capacity and driver time limits.")
+
+    # Render results if present in session state
+    if 'routes' in st.session_state:
+        routes = st.session_state['routes']
+        total_time = st.session_state['total_time']
+        df_loc = st.session_state['df_loc']
+
+        st.success(f"🎉 Optimization Complete! Active Fleet: {len(routes)} trucks | Total Driving Duration: {total_time} mins ({round(total_time / 60, 2)} hrs)")
+
+        # 1. Combined Master Map
+        st.subheader("🌐 Master Fleet Coverage Map")
+        st.caption("Shows all vehicle trajectories together to verify all locations are included in the overall loop.")
+        master_fig = render_combined_master_map(df_loc, routes)
+        st.pyplot(master_fig)
+        plt.close(master_fig)
+
+        # 2. Summary Table & Inspection Buttons
+        st.subheader("📊 Fleet Dispatch Summary")
+        summary_data = []
+        for r in routes:
+            sequence = " -> ".join([s['loc_id'] for s in r['stops']])
+            summary_data.append({
+                "Vehicle ID": r['v_code'],
+                "Vehicle Type": r['v_type'],
+                "Capacity (Pallets)": r['v_cap'],
+                "Start Location": r['start_loc'],
+                "Duration (Mins)": r['duration_mins'],
+                "Route Sequence": sequence
+            })
+        st.dataframe(pd.DataFrame(summary_data), use_container_width=True)
+
+        # 3. Individual Route Inspection Controls
+        st.subheader("🔍 Inspect & Analyze Individual Vehicle Routes")
+        st.caption("Click any button below to open a full-screen view and examine step-by-step load/unload activities.")
+
+        cols = st.columns(min(len(routes), 3))
+        for idx, r in enumerate(routes):
+            with cols[idx % 3]:
+                if st.button(f"🔍 Open Truck {r['truck_num']} ({r['v_code']}) Activity Modal", key=f"btn_modal_{r['truck_num']}"):
+                    show_route_detail_modal(df_loc, r)
+
+        # 4. Google Maps Integration
+        st.subheader("📍 Google Maps Integration")
+        kml_data = generate_kml_file(routes)
+        st.download_button(
+            label="🗺️ Download KML File for Google My Maps",
+            data=kml_data,
+            file_name="optimized_milk_run_routes.kml",
+            mime="application/vnd.google-earth.kml+xml",
+            help="Import this file into Google My Maps (mymaps.google.com) to view all routes together!"
+        )
+
+        st.markdown("##### 🔗 Direct Google Maps Navigation Links:")
+        map_cols = st.columns(min(len(routes), 3))
+        for idx, r in enumerate(routes):
+            gmaps_url = generate_google_maps_url(r['stops'])
+            with map_cols[idx % 3]:
+                st.link_button(
+                    f"🚚 Truck {r['truck_num']} ({r['v_code']}) Direct Route", 
+                    gmaps_url
+                )
 
 else:
     st.info("👈 Please upload `locations_master`, `demands_flows`, and `fleet_master` CSV/Excel files using the sidebar.")
