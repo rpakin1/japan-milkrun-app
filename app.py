@@ -73,14 +73,14 @@ def solve_pdvrp_engine(df_loc, df_dem, df_fleet, time_matrix, start_mode='AUTOMA
     node_matrix_indices = []
     node_demands = []
 
-    # 1. Create 0-demand Dummy Start Nodes for each vehicle in the available fleet
+    # 1. Create 0-demand Start Nodes for each vehicle in the available fleet
     starts = list(range(num_vehicles))
     start_locations = []
     for v_idx in range(num_vehicles):
         if start_mode == 'USER_DEFINED' and custom_start_list:
             loc_name = custom_start_list[v_idx % len(custom_start_list)]
         else:
-            loc_name = 'OURA'
+            loc_name = 'OURA'  # Original Central Base Depot
         start_locations.append(loc_name)
         node_matrix_indices.append(loc_to_idx.get(loc_name, 0))
         node_demands.append(0)
@@ -325,7 +325,7 @@ if file_loc and file_dem and file_fleet:
     st.subheader("⚙️ Solver Settings")
     start_option = st.radio(
         "Select Vehicle Dispatch Start Mode:",
-        ["Option 1: User-Defined Starts", "Option 2: Program-Optimized Starts (Automatic)"]
+        ["Option 1: User-Defined Starts", "Option 2: Default Base Start (OURA)"]
     )
 
     all_locations = df_loc['Location_ID'].tolist()
@@ -361,41 +361,8 @@ if file_loc and file_dem and file_fleet:
     mode_key = 'USER_DEFINED' if "Option 1" in start_option else 'AUTOMATIC'
 
     if st.button("🚀 Run Optimization"):
-        if mode_key == 'AUTOMATIC':
-            best_routes = None
-            best_time = float('inf')
-            best_start_loc = None
-
-            candidate_locations = df_loc['Location_ID'].tolist()
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-
-            for idx, cand in enumerate(candidate_locations):
-                status_text.text(f"Evaluating candidate starting location ({idx + 1}/{len(candidate_locations)}): {cand}...")
-                
-                test_routes, test_time = solve_pdvrp_engine(
-                    df_loc, df_dem, df_fleet, time_matrix, 
-                    start_mode='USER_DEFINED', 
-                    custom_start_list=[cand]
-                )
-
-                if test_routes and test_time < best_time:
-                    best_time = test_time
-                    best_routes = test_routes
-                    best_start_loc = cand
-
-                progress_bar.progress((idx + 1) / len(candidate_locations))
-
-            progress_bar.empty()
-            status_text.empty()
-
-            routes, total_time = best_routes, best_time
-
-            if best_start_loc:
-                st.info(f"💡 **Program Recommendation:** Starting dispatches from **{best_start_loc}** yields the optimal driving duration ({total_time} mins).")
-        else:
-            with st.spinner("Calculating optimal routes using Google OR-Tools..."):
-                routes, total_time = solve_pdvrp_engine(df_loc, df_dem, df_fleet, time_matrix, mode_key, custom_starts)
+        with st.spinner("Calculating optimal routes using Google OR-Tools..."):
+            routes, total_time = solve_pdvrp_engine(df_loc, df_dem, df_fleet, time_matrix, mode_key, custom_starts)
 
         if routes:
             st.success(f"🎉 Optimization Complete! Active Fleet: {len(routes)} trucks | Total Driving Duration: {total_time} mins ({round(total_time / 60, 2)} hrs)")
