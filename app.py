@@ -46,6 +46,7 @@ def load_uploaded_file(uploaded_file):
 # 3. Distance Matrix & Optimization Engine
 # ==============================================================================
 def compute_haversine_matrix(df):
+    """Calculates travel duration matrix (in minutes) between coordinates."""
     coords = list(zip(df['Latitude'], df['Longitude']))
     n = len(coords)
     matrix = [[0] * n for _ in range(n)]
@@ -66,26 +67,36 @@ def solve_pdvrp_engine(df_loc, df_dem, df_fleet, time_matrix, start_mode='AUTOMA
     df_dem_sub = df_dem[df_dem['Schedule'].isin(['MWF', 'Daily', 'TT'])].reset_index(drop=True)
     loc_to_idx = {loc_id: idx for idx, loc_id in enumerate(df_loc['Location_ID'])}
 
-    num_reqs = len(df_dem_sub)
     num_vehicles = len(df_fleet)
+    num_locs = len(df_loc)
 
     node_matrix_indices = []
     node_demands = []
 
-    # 1. Create 0-demand Dummy Start Nodes for each vehicle in the available fleet
+    # 1. Create Dummy / User-Defined Start Nodes for each vehicle
     starts = list(range(num_vehicles))
-    start_locations = []
+    
+    # If AUTOMATIC mode, add a 0-distance Virtual Dummy Start Node
+    dummy_start_matrix_idx = num_locs  # Virtual location index
+    
+    # Build expanded distance matrix including Virtual Dummy Start Node if in AUTOMATIC mode
+    if start_mode == 'AUTOMATIC':
+        exp_time_matrix = [row + [0] for row in time_matrix]
+        exp_time_matrix.append([0] * (num_locs + 1))
+    else:
+        exp_time_matrix = time_matrix
+
     for v_idx in range(num_vehicles):
         if start_mode == 'USER_DEFINED' and custom_start_list:
             loc_name = custom_start_list[v_idx % len(custom_start_list)]
+            node_matrix_indices.append(loc_to_idx.get(loc_name, 0))
         else:
-            loc_name = 'OURA'
-        start_locations.append(loc_name)
-        node_matrix_indices.append(loc_to_idx.get(loc_name, 0))
+            # Open/Free start: Point vehicle start to Virtual Dummy Node
+            node_matrix_indices.append(dummy_start_matrix_idx)
         node_demands.append(0)
 
     # 2. Create 0-demand Shared Return Depot Node (OURA)
-    end_depot_node = num_vehicles
+    end_depot_node = len(node_matrix_indices)
     ends = [end_depot_node] * num_vehicles
     node_matrix_indices.append(loc_to_idx['OURA'])
     node_demands.append(0)
@@ -114,7 +125,7 @@ def solve_pdvrp_engine(df_loc, df_dem, df_fleet, time_matrix, start_mode='AUTOMA
 
     def time_cb(from_idx, to_idx):
         fn, tn = manager.IndexToNode(from_idx), manager.IndexToNode(to_idx)
-        return time_matrix[node_matrix_indices[fn]][node_matrix_indices[tn]]
+        return exp_time_matrix[node_matrix_indices[fn]][node_matrix_indices[tn]]
 
     tc_idx = routing.RegisterTransitCallback(time_cb)
     routing.SetArcCostEvaluatorOfAllVehicles(tc_idx)
@@ -166,22 +177,29 @@ def solve_pdvrp_engine(df_loc, df_dem, df_fleet, time_matrix, start_mode='AUTOMA
         while not routing.IsEnd(idx):
             node_idx = manager.IndexToNode(idx)
             m_idx = node_matrix_indices[node_idx]
-            stops.append({
-                'loc_id': df_loc.loc[m_idx, 'Location_ID'],
-                'lat': df_loc.loc[m_idx, 'Latitude'],
-                'lon': df_loc.loc[m_idx, 'Longitude'],
-                'demand': node_demands[node_idx]
-            })
+            
+            # Skip virtual dummy start node from visible route stops
+            if m_idx != dummy_start_matrix_idx:
+                stops.append({
+                    'loc_id': df_loc.loc[m_idx, 'Location_ID'],
+                    'lat': df_loc.loc[m_idx, 'Latitude'],
+                    'lon': df_loc.loc[m_idx, 'Longitude'],
+                    'demand': node_demands[node_idx]
+                })
             idx = sol.Value(routing.NextVar(idx))
+            
         stops.append({'loc_id': 'OURA', 'lat': df_loc.loc[0, 'Latitude'], 'lon': df_loc.loc[0, 'Longitude'], 'demand': 0})
         duration = sol.Min(time_dim.CumulVar(routing.End(v)))
         total_time += duration
+        
+        actual_start_loc = stops[0]['loc_id'] if stops else 'OURA'
+        
         active_routes.append({
             'truck_num': len(active_routes) + 1,
             'v_code': v_code,
             'v_type': v_type,
             'v_cap': v_cap,
-            'start_loc': start_locations[v],
+            'start_loc': actual_start_loc,
             'duration_mins': duration,
             'color': colors[len(active_routes) % len(colors)],
             'stops': stops
@@ -322,7 +340,7 @@ if file_loc and file_dem and file_fleet:
     st.subheader("⚙️ Solver Settings")
     start_option = st.radio(
         "Select Vehicle Dispatch Start Mode:",
-        ["Option 1: User-Defined Starts", "Option 2: Program-Optimized Starts (Automatic)"]
+        ["Option 1: User-Defined Starts", "Option 2: Program-Optimized Starts (Open Free Starts)"]
     )
 
     all_locations = df_loc['Location_ID'].tolist()
@@ -358,45 +376,15 @@ if file_loc and file_dem and file_fleet:
     mode_key = 'USER_DEFINED' if "Option 1" in start_option else 'AUTOMATIC'
 
     if st.button("🚀 Run Optimization"):
-        if mode_key == 'AUTOMATIC':
-            best_routes = None
-            best_time = float('inf')
-            best_start_loc = None
-
-            candidate_locations = df_loc['Location_ID'].tolist()
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-
-            for idx, cand in enumerate(candidate_locations):
-                status_text.text(f"Evaluating candidate starting location ({idx + 1}/{len(candidate_locations)}): {cand}...")
-                
-                # Test all vehicles starting from candidate location 'cand'
-                test_routes, test_time = solve_pdvrp_engine(
-                    df_loc, df_dem, df_fleet, time_matrix, 
-                    start_mode='USER_DEFINED', 
-                    custom_start_list=[cand]
-                )
-
-                if test_routes and test_time < best_time:
-                    best_time = test_time
-                    best_routes = test_routes
-                    best_start_loc = cand
-
-                progress_bar.progress((idx + 1) / len(candidate_locations))
-
-            progress_bar.empty()
-            status_text.empty()
-
-            routes, total_time = best_routes, best_time
-
-            if best_start_loc:
-                st.info(f"💡 **Program Recommendation:** Starting all dispatches from **{best_start_loc}** yields the optimal driving duration ({total_time} mins).")
-        else:
-            with st.spinner("Calculating optimal routes using Google OR-Tools..."):
-                routes, total_time = solve_pdvrp_engine(df_loc, df_dem, df_fleet, time_matrix, mode_key, custom_starts)
+        with st.spinner("Calculating optimal routes using Google OR-Tools..."):
+            routes, total_time = solve_pdvrp_engine(df_loc, df_dem, df_fleet, time_matrix, mode_key, custom_starts)
 
         if routes:
             st.success(f"🎉 Optimization Complete! Active Fleet: {len(routes)} trucks | Total Driving Duration: {total_time} mins ({round(total_time / 60, 2)} hrs)")
+
+            if mode_key == 'AUTOMATIC':
+                assigned_starts = ", ".join([f"Truck {r['truck_num']}: {r['start_loc']}" for r in routes])
+                st.info(f"💡 **Program-Optimized Unique Starts:** {assigned_starts}")
 
             # Summary Table
             st.subheader("📊 Fleet Dispatch Summary")
